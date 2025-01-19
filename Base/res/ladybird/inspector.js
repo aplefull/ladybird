@@ -337,9 +337,32 @@ inspector.setStyleSheetSource = (identifier, sourceBase64) => {
 };
 
 inspector.createPropertyTables = (computedStyle, resolvedStyle, customProperties) => {
+    const createPropertyFilter = containerId => {
+        const container = document.getElementById(containerId);
+        const table = container.querySelector(".property-table");
+
+        const filterInput = document.createElement("input");
+        filterInput.className = "property-filter";
+        filterInput.placeholder = "Filter properties";
+
+        table.parentNode.insertBefore(filterInput, table);
+
+        filterInput.addEventListener("input", event => {
+            const searchText = event.target.value.toLowerCase();
+            const tbody = table.querySelector("tbody");
+            const rows = tbody.getElementsByTagName("tr");
+
+            for (let row of rows) {
+                const nameMatch = row.cells[0].textContent.toLowerCase().includes(searchText);
+                const valueMatch = row.cells[1].textContent.toLowerCase().includes(searchText);
+
+                row.style.display = nameMatch || valueMatch ? "" : "none";
+            }
+        });
+    };
+
     const createPropertyTable = (tableID, properties) => {
         let oldTable = document.getElementById(tableID);
-
         let newTable = document.createElement("tbody");
         newTable.setAttribute("id", tableID);
 
@@ -371,6 +394,12 @@ inspector.createPropertyTables = (computedStyle, resolvedStyle, customProperties
         oldTable.parentNode.replaceChild(newTable, oldTable);
     };
 
+    // Setup filters
+    createPropertyFilter("computed-style");
+    createPropertyFilter("resolved-style");
+    createPropertyFilter("custom-properties");
+
+    // Create tables
     createPropertyTable("computed-style-table", JSON.parse(computedStyle));
     createPropertyTable("resolved-style-table", JSON.parse(resolvedStyle));
     createPropertyTable("custom-properties-table", JSON.parse(customProperties));
