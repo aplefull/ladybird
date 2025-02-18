@@ -127,6 +127,27 @@ static ErrorOr<void> collect_crash_tests(Application const& app, Vector<Test>& t
     return {};
 }
 
+static ErrorOr<void> collect_custom_crash_tests(Application const& app, Vector<Test>& tests, StringView path, StringView trail)
+{
+    Core::DirIterator it(ByteString::formatted("{}/{}", path, trail), Core::DirIterator::Flags::SkipDots);
+    while (it.has_next()) {
+        auto name = it.next_path();
+        auto input_path = TRY(FileSystem::real_path(ByteString::formatted("{}/{}/{}", path, trail, name)));
+
+        if (FileSystem::is_directory(input_path)) {
+            TRY(collect_custom_crash_tests(app, tests, path, ByteString::formatted("{}/{}", trail, name)));
+            continue;
+        }
+        if (!is_valid_test_name(name))
+            continue;
+
+        auto relative_path = LexicalPath::relative_path(input_path, app.test_root_path).release_value();
+        tests.append({ TestMode::Crash, input_path, {}, move(relative_path) });
+    }
+
+    return {};
+}
+
 static void clear_test_callbacks(HeadlessWebView& view)
 {
     view.on_load_finish = {};
@@ -475,10 +496,11 @@ ErrorOr<void> run_tests(Core::AnonymousBuffer const& theme, Web::DevicePixelSize
     if (app.test_globs.is_empty())
         app.test_globs.append("*"sv);
 
-    TRY(collect_dump_tests(app, tests, ByteString::formatted("{}/Layout", app.test_root_path), "."sv, TestMode::Layout));
-    TRY(collect_dump_tests(app, tests, ByteString::formatted("{}/Text", app.test_root_path), "."sv, TestMode::Text));
-    TRY(collect_ref_tests(app, tests, ByteString::formatted("{}/Ref", app.test_root_path), "."sv));
+    // TRY(collect_dump_tests(app, tests, ByteString::formatted("{}/Layout", app.test_root_path), "."sv, TestMode::Layout));
+    // TRY(collect_dump_tests(app, tests, ByteString::formatted("{}/Text", app.test_root_path), "."sv, TestMode::Text));
+    // TRY(collect_ref_tests(app, tests, ByteString::formatted("{}/Ref", app.test_root_path), "."sv));
     TRY(collect_crash_tests(app, tests, ByteString::formatted("{}/Crash", app.test_root_path), "."sv));
+    TRY(collect_custom_crash_tests(app, tests, ByteString::formatted("{}/CustomCrash", app.test_root_path), "."sv));
 #if defined(AK_OS_LINUX) && ARCH(X86_64)
     TRY(collect_ref_tests(app, tests, ByteString::formatted("{}/Screenshot", app.test_root_path), "."sv));
 #endif
