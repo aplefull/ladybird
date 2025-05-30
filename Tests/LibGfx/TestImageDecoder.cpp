@@ -470,6 +470,19 @@ TEST_CASE(test_png_malformed_frame)
     }
 }
 
+TEST_CASE(test_png_two_idats_truncated)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/two-idats-truncated.png"sv)));
+    EXPECT(Gfx::PNGImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::PNGImageDecoderPlugin::create(file->bytes()));
+
+    auto frame = TRY_OR_FAIL(plugin_decoder->frame(0));
+
+    EXPECT_EQ(frame.image->size(), Gfx::IntSize(100, 100));
+    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+    EXPECT_EQ(frame.image->get_pixel(99, 99), Gfx::Color::NamedColor::Transparent);
+}
+
 TEST_CASE(test_tiff_uncompressed)
 {
     auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("tiff/uncompressed.tiff"sv)));

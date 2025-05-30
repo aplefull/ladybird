@@ -256,7 +256,12 @@ ErrorOr<size_t> PNGLoadingContext::read_frames(png_structp png_ptr, png_infop in
         for (auto i = 0; i < frame_size.height(); ++i)
             row_pointers[i] = frame_bitmap->scanline_u8(i);
 
-        png_read_image(png_ptr, row_pointers.data());
+        if (setjmp(png_jmpbuf(png_ptr)) == 0) {
+            png_read_image(png_ptr, row_pointers.data());
+        } else {
+            dbgln("PNG decoding error. Returning partial frame.");
+        }
+
         return frame_bitmap;
     };
 
