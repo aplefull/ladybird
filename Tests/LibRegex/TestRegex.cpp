@@ -446,6 +446,25 @@ TEST_CASE(ecma262_named_capture_group_with_dollar_sign)
     EXPECT_EQ(re.parser_result.bytecode.get_string(result.capture_group_matches.at(1).at(0).capture_group_name), "$Test$");
 }
 
+TEST_CASE(named_capture_groups_source_order)
+{
+    Regex<ECMA262> re("(?<y>a)(?<x>a)|(?<x>b)(?<y>b)");
+    auto result = re.match("aa"sv);
+    EXPECT(result.success);
+
+    EXPECT_EQ(re.parser_result.capture_groups.size(), 2u);
+    EXPECT_EQ(re.parser_result.capture_groups[0], "y");
+    EXPECT_EQ(re.parser_result.capture_groups[1], "x");
+
+    Regex<ECMA262> re2("(?<fst>.)|(?<snd>.)");
+    auto result2 = re2.match("a"sv);
+    EXPECT(result2.success);
+
+    EXPECT_EQ(re2.parser_result.capture_groups.size(), 2u);
+    EXPECT_EQ(re2.parser_result.capture_groups[0], "fst");
+    EXPECT_EQ(re2.parser_result.capture_groups[1], "snd");
+}
+
 TEST_CASE(a_star)
 {
     Regex<PosixExtended> re("a*");
