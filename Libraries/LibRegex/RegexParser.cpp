@@ -173,6 +173,7 @@ ALWAYS_INLINE void Parser::reset()
     m_parser_state.capture_groups_count = 0;
     m_parser_state.named_capture_groups_count = 0;
     m_parser_state.named_capture_groups.clear();
+    m_parser_state.named_capture_groups_source_order.clear();
 }
 
 Parser::Result Parser::parse(Optional<AllOptions> regex_options)
@@ -195,7 +196,7 @@ Parser::Result Parser::parse(Optional<AllOptions> regex_options)
         move(m_parser_state.match_length_minimum),
         move(m_parser_state.error),
         move(m_parser_state.error_token),
-        m_parser_state.named_capture_groups.keys(),
+        m_parser_state.named_capture_groups_source_order,
         m_parser_state.regex_options,
     };
 }
@@ -2706,6 +2707,9 @@ bool ECMA262Parser::parse_capture_group(ByteCode& stack, size_t& match_length_mi
                 return false;
             }
 
+            if (!m_parser_state.named_capture_groups.contains(name)) {
+                m_parser_state.named_capture_groups_source_order.append(name);
+            }
             m_parser_state.named_capture_groups.ensure(name).append({ group_index, m_current_alternative_id });
 
             ByteCode capture_group_bytecode;

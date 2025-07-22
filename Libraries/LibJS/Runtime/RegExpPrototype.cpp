@@ -100,7 +100,7 @@ static Value get_match_index_par(VM& vm, Utf16View const& string, Match const& m
 }
 
 // 22.2.7.8 MakeMatchIndicesIndexPairArray ( S, indices, groupNames, hasGroups ), https://tc39.es/ecma262/#sec-makematchindicesindexpairarray
-static Value make_match_indices_index_pair_array(VM& vm, Utf16View const& string, Vector<Optional<Match>> const& indices, HashMap<FlyString, Match> const& group_names, bool has_groups)
+static Value make_match_indices_index_pair_array(VM& vm, Utf16View const& string, Vector<Optional<Match>> const& indices, HashMap<FlyString, Match> const& group_names, bool has_groups, Vector<FlyString> const& capture_groups_source_order)
 {
     // Note: This implementation differs from the spec, but has the same behavior.
     //
@@ -151,13 +151,17 @@ static Value make_match_indices_index_pair_array(VM& vm, Utf16View const& string
         MUST(array->create_data_property_or_throw(i, match_indices_array));
     }
 
-    for (auto const& entry : group_names) {
-        auto match_indices_array = get_match_index_par(vm, string, entry.value);
-
-        // e. If i > 0 and groupNames[i - 1] is not undefined, then
-        //     i. Assert: groups is not undefined.
-        //     ii. Perform ! CreateDataPropertyOrThrow(groups, groupNames[i - 1], matchIndicesArray).
-        MUST(groups.as_object().create_data_property_or_throw(entry.key, match_indices_array));
+    // Add all named groups to the groups object in source order
+    if (has_groups) {
+        for (auto const& group_name : capture_groups_source_order) {
+            Value match_indices_array = js_undefined();
+            if (auto it = group_names.find(group_name); it != group_names.end()) {
+                // Group participated in the match
+                match_indices_array = get_match_index_par(vm, string, it->value);
+            }
+            // Add the property even if the group didn't participate (with undefined value)
+            MUST(groups.as_object().create_data_property_or_throw(group_name, match_indices_array));
+        }
     }
 
     // 8. Perform ! CreateDataPropertyOrThrow(A, "groups", groups).
@@ -292,6 +296,8 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
     bool has_groups = result.n_named_capture_groups != 0;
     auto groups_object = has_groups ? Object::create(realm, nullptr) : GC::Ptr<Object> {};
 
+    HashMap<FlyString, Value> named_captures;
+
     // 33. For each integer i such that i ≥ 1 and i ≤ n, in ascending order, do
     for (size_t i = 1; i <= result.n_capture_groups; ++i) {
         // a. Let captureI be ith element of r's captures List.
@@ -333,8 +339,10 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
             // i. Let s be the CapturingGroupName of the corresponding RegExpIdentifierName.
             auto group_name = regex.parser_result.bytecode.get_string(capture.capture_group_name);
 
-            // ii. Perform ! CreateDataPropertyOrThrow(groups, s, capturedValue).
-            MUST(groups_object->create_data_property_or_throw(group_name, captured_value));
+            // Store the named capture for later processing in source order
+            if (!capture.view.is_null()) {
+                named_captures.set(group_name, captured_value);
+            }
 
             // iii. Append s to groupNames.
             group_names.set(move(group_name), Match::create(capture));
@@ -343,6 +351,15 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
         else {
             // i. Append undefined to groupNames.
             // See the note in MakeIndicesArray for why this step is skipped.
+        }
+    }
+
+    // Create groups object properties in source order (all named groups, undefined if not captured)
+    if (has_groups) {
+        for (auto const& group_name : regex.parser_result.capture_groups) {
+            auto captured_value = named_captures.get(group_name).value_or(js_undefined());
+            // ii. Perform ! CreateDataPropertyOrThrow(groups, s, capturedValue).
+            MUST(groups_object->create_data_property_or_throw(group_name, captured_value));
         }
     }
 
@@ -373,7 +390,7 @@ static ThrowCompletionOr<Value> regexp_builtin_exec(VM& vm, RegExpObject& regexp
     // 34. If hasIndices is true, then
     if (has_indices) {
         // a. Let indicesArray be MakeMatchIndicesIndexPairArray(S, indices, groupNames, hasGroups).
-        auto indices_array = make_match_indices_index_pair_array(vm, string->utf16_string_view(), indices, group_names, has_groups);
+        auto indices_array = make_match_indices_index_pair_array(vm, string->utf16_string_view(), indices, group_names, has_groups, regex.parser_result.capture_groups);
         // b. Perform ! CreateDataProperty(A, "indices", indicesArray).
         MUST(array->create_data_property(vm.names.indices, indices_array));
     }
