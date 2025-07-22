@@ -5,6 +5,7 @@
  */
 
 #include <LibWeb/CSS/Length.h>
+#include <LibWeb/CSS/StyleValues/DisplayStyleValue.h>
 #include <LibWeb/DOM/Node.h>
 #include <LibWeb/Dump.h>
 #include <LibWeb/Layout/BlockContainer.h>
@@ -493,8 +494,28 @@ StaticPositionRect InlineFormattingContext::calculate_static_position_rect(Box c
             }
         }
         if (last_fragment) {
-            x = last_fragment->offset().x() + last_fragment->width();
-            y = last_fragment->offset().y() + last_fragment->height();
+            bool originally_block_outside = true;
+
+            if (is<DOM::Element>(box.dom_node())) {
+                auto const& element = static_cast<DOM::Element const&>(*box.dom_node());
+                if (auto cascaded_props = element.cascaded_properties({})) {
+                    if (auto original_display_value = cascaded_props->property(CSS::PropertyID::Display)) {
+                        if (original_display_value->is_display()) {
+                            originally_block_outside = original_display_value->as_display().display().is_block_outside();
+                        }
+                    }
+                }
+            }
+
+            if (originally_block_outside) {
+                // block-level absolutely positioned element: start of new line
+                x = 0;
+                y = last_fragment->offset().y() + last_fragment->height();
+            } else {
+                // inline-level absolutely positioned element: positioned inline after previous content
+                x = last_fragment->offset().x() + last_fragment->width();
+                y = last_fragment->offset().y() + last_fragment->height();
+            }
         }
     } else {
         // Easy case: no previous sibling, we're at the top of the containing block.
