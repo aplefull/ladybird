@@ -2463,6 +2463,19 @@ bool ECMA262Parser::parse_nested_class(Vector<regex::CompareTypeAndValuePair>& c
                 compares.empend(CompareTypeAndValuePair { CharacterCompareType::Inverse, 0 });
             property.visit(
                 [&](Unicode::Property property) {
+                    if (Unicode::is_ecma262_string_property(property)) {
+                        if (negated) {
+                            set_error(Error::InvalidCharacterClass);
+                            return;
+                        }
+
+                        for (auto const& compare : compares) {
+                            if (compare.type == CharacterCompareType::Inverse) {
+                                set_error(Error::InvalidCharacterClass);
+                                return;
+                            }
+                        }
+                    }
                     compares.empend(CompareTypeAndValuePair { CharacterCompareType::Property, (ByteCodeValueType)property.value() });
                 },
                 [&](Unicode::GeneralCategory general_category) {
@@ -2506,10 +2519,21 @@ bool ECMA262Parser::parse_unicode_property_escape(PropertyEscape& property, bool
     property = move(*parsed_property);
 
     return property.visit(
-        [this](Unicode::Property property) {
+        [this, negated](Unicode::Property property) {
             if (!Unicode::is_ecma262_property(property)) {
                 set_error(Error::InvalidNameForProperty);
                 return false;
+            }
+            if (Unicode::is_ecma262_string_property(property)) {
+                if (!m_parser_state.regex_options.has_flag_set(AllFlags::UnicodeSets)) {
+                    set_error(Error::InvalidNameForProperty);
+                    return false;
+                }
+
+                if (negated) {
+                    set_error(Error::InvalidNameForProperty);
+                    return false;
+                }
             }
             return true;
         },
