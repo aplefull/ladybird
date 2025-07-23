@@ -245,6 +245,7 @@ bool is_ecma262_property(Property property)
     switch (property.value()) {
     case UCHAR_ASCII_HEX_DIGIT:
     case UCHAR_ALPHABETIC:
+    case UCHAR_BASIC_EMOJI:
     case UCHAR_BIDI_CONTROL:
     case UCHAR_BIDI_MIRRORED:
     case UCHAR_CASE_IGNORABLE:
@@ -259,6 +260,7 @@ bool is_ecma262_property(Property property)
     case UCHAR_DEFAULT_IGNORABLE_CODE_POINT:
     case UCHAR_DEPRECATED:
     case UCHAR_DIACRITIC:
+    case UCHAR_EMOJI_KEYCAP_SEQUENCE:
     case UCHAR_EMOJI:
     case UCHAR_EMOJI_COMPONENT:
     case UCHAR_EMOJI_MODIFIER:
@@ -284,6 +286,11 @@ bool is_ecma262_property(Property property)
     case UCHAR_QUOTATION_MARK:
     case UCHAR_RADICAL:
     case UCHAR_REGIONAL_INDICATOR:
+    case UCHAR_RGI_EMOJI:
+    case UCHAR_RGI_EMOJI_FLAG_SEQUENCE:
+    case UCHAR_RGI_EMOJI_MODIFIER_SEQUENCE:
+    case UCHAR_RGI_EMOJI_TAG_SEQUENCE:
+    case UCHAR_RGI_EMOJI_ZWJ_SEQUENCE:
     case UCHAR_S_TERM:
     case UCHAR_SOFT_DOTTED:
     case UCHAR_TERMINAL_PUNCTUATION:
@@ -293,6 +300,23 @@ bool is_ecma262_property(Property property)
     case UCHAR_WHITE_SPACE:
     case UCHAR_XID_CONTINUE:
     case UCHAR_XID_START:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// https://tc39.es/ecma262/#table-binary-unicode-properties-of-strings
+bool is_ecma262_string_property(Property property)
+{
+    switch (property.value()) {
+    case UCHAR_BASIC_EMOJI:
+    case UCHAR_EMOJI_KEYCAP_SEQUENCE:
+    case UCHAR_RGI_EMOJI:
+    case UCHAR_RGI_EMOJI_FLAG_SEQUENCE:
+    case UCHAR_RGI_EMOJI_TAG_SEQUENCE:
+    case UCHAR_RGI_EMOJI_MODIFIER_SEQUENCE:
+    case UCHAR_RGI_EMOJI_ZWJ_SEQUENCE:
         return true;
     default:
         return false;
