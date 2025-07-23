@@ -8,11 +8,13 @@
 #include <AK/CharacterTypes.h>
 #include <AK/Find.h>
 #include <AK/Traits.h>
+#include <AK/Vector.h>
 #include <LibUnicode/CharacterTypes.h>
 #include <LibUnicode/ICU.h>
 
 #include <unicode/uchar.h>
 #include <unicode/uscript.h>
+#include <unicode/ustring.h>
 
 namespace Unicode {
 
@@ -321,6 +323,67 @@ bool is_ecma262_string_property(Property property)
     default:
         return false;
     }
+}
+
+size_t match_string_property(StringView string, Property property)
+{
+    if (!is_ecma262_string_property(property))
+        return 0;
+
+    if (string.is_empty())
+        return 0;
+
+    auto icu_property = static_cast<UProperty>(property.value());
+    auto utf8_bytes = string.bytes();
+    Vector<UChar> full_icu_string;
+
+    UErrorCode status = U_ZERO_ERROR;
+    int32_t full_dest_length = 0;
+
+    u_strFromUTF8(nullptr, 0, &full_dest_length,
+        reinterpret_cast<char const*>(utf8_bytes.data()),
+        static_cast<int32_t>(utf8_bytes.size()), &status);
+
+    if (status != U_BUFFER_OVERFLOW_ERROR && U_FAILURE(status))
+        return 0;
+
+    status = U_ZERO_ERROR;
+    full_icu_string.resize_and_keep_capacity(full_dest_length);
+
+    u_strFromUTF8(full_icu_string.data(), full_dest_length, nullptr,
+        reinterpret_cast<char const*>(utf8_bytes.data()),
+        static_cast<int32_t>(utf8_bytes.size()), &status);
+
+    if (U_FAILURE(status))
+        return 0;
+
+    Utf8View utf8_view { string };
+    size_t total_code_points = 0;
+    for (auto it = utf8_view.begin(); it != utf8_view.end(); ++it) {
+        ++total_code_points;
+    }
+
+    for (size_t test_code_points = total_code_points; test_code_points >= 1; --test_code_points) {
+        size_t current_code_points = 0;
+        int32_t utf16_length = 0;
+
+        for (auto it = utf8_view.begin(); it != utf8_view.end() && current_code_points < test_code_points; ++it) {
+            u32 code_point = *it;
+
+            if (code_point <= 0xFFFF) {
+                utf16_length += 1;
+            } else {
+                utf16_length += 2;
+            }
+            ++current_code_points;
+        }
+
+        if (u_stringHasBinaryProperty(full_icu_string.data(), utf16_length, icu_property)) {
+            return test_code_points;
+        }
+    }
+
+    return 0;
 }
 
 Optional<Script> script_from_string(StringView script)

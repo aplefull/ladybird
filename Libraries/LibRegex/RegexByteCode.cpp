@@ -843,6 +843,22 @@ ALWAYS_INLINE void OpCode_Compare::compare_property(MatchInput const& input, Mat
     if (state.string_position == input.view.length())
         return;
 
+    if (Unicode::is_ecma262_string_property(property)) {
+        auto remaining_view = input.view.substring_view(state.string_position, input.view.length() - state.string_position);
+        auto remaining_string = remaining_view.to_byte_string();
+        if (auto sequence_length = Unicode::match_string_property(remaining_string.view(), property); sequence_length > 0) {
+            if (inverse) {
+                inverse_matched = true;
+            } else {
+                for (size_t i = 0; i < sequence_length && state.string_position < input.view.length(); ++i) {
+                    u32 code_point = input.view.code_point_at(state.string_position_in_code_units);
+                    advance_string_position(state, input.view, code_point);
+                }
+            }
+        }
+        return;
+    }
+
     u32 code_point = input.view.code_point_at(state.string_position_in_code_units);
     bool equal = Unicode::code_point_has_property(code_point, property);
 
