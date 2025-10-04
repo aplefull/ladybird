@@ -54,6 +54,8 @@ public:
 
     explicit Parser(Lexer lexer, Program::Type program_type = Program::Type::Script, Optional<EvalInitialState> initial_state_for_eval = {});
 
+    void set_is_parsing_for_json_parse() { m_state.is_parsing_for_json_parse = true; }
+
     NonnullRefPtr<Program> parse_program(bool starts_in_strict_mode = false);
 
     template<typename FunctionNodeType>
@@ -314,6 +316,7 @@ private:
         bool in_class_field_initializer { false };
         bool in_class_static_init_block { false };
         bool function_might_need_arguments_object { false };
+        bool is_parsing_for_json_parse { false };
 
         ParserState(Lexer, Program::Type);
     };

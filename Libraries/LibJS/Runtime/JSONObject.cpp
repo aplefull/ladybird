@@ -12,6 +12,9 @@
 #include <AK/TypeCasts.h>
 #include <AK/Utf16View.h>
 #include <AK/Utf8View.h>
+#include <LibJS/Bytecode/Interpreter.h>
+#include <LibJS/Lexer.h>
+#include <LibJS/Parser.h>
 #include <LibJS/Runtime/AbstractOperations.h>
 #include <LibJS/Runtime/Array.h>
 #include <LibJS/Runtime/BigIntObject.h>
@@ -25,6 +28,7 @@
 #include <LibJS/Runtime/RawJSONObject.h>
 #include <LibJS/Runtime/StringObject.h>
 #include <LibJS/Runtime/ValueInlines.h>
+#include <LibJS/Script.h>
 
 namespace JS {
 
@@ -415,6 +419,7 @@ String JSONObject::quote_json_string(Utf16View const& string)
 }
 
 // 25.5.1 JSON.parse ( text [ , reviver ] ), https://tc39.es/ecma262/#sec-json.parse
+// 1.2 JSON.parse ( text [ , reviver ] ), https://tc39.es/proposal-json-parse-with-source/#sec-json.parse
 JS_DEFINE_NATIVE_FUNCTION(JSONObject::parse)
 {
     auto& realm = *vm.current_realm();
@@ -425,10 +430,52 @@ JS_DEFINE_NATIVE_FUNCTION(JSONObject::parse)
     // 1. Let jsonString be ? ToString(text).
     auto json_string = TRY(text.to_string(vm));
 
-    // 2. Let unfiltered be ? ParseJSON(jsonString).
-    auto unfiltered = TRY(parse_json(vm, json_string));
+    // 2. Parse StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
+    //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
+    auto json = JsonValue::from_string(json_string);
+    if (json.is_error())
+        return vm.throw_completion<SyntaxError>(ErrorType::JsonMalformed);
 
-    // 3. If IsCallable(reviver) is true, then
+    // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
+    auto script_string = MUST(String::formatted("({});", json_string));
+
+    // 4. Let script be ParseText(StringToCodePoints(scriptString), Script).
+    auto parser = Parser { Lexer { script_string }, Program::Type::Script };
+    parser.set_is_parsing_for_json_parse();
+    auto program = parser.parse_program();
+
+    // 5. NOTE: The early error rules defined in 13.2.5.1 have special handling for the above invocation of ParseText.
+
+    // 6. Assert: script is a Parse Node.
+    if (parser.has_errors())
+        return vm.throw_completion<SyntaxError>(ErrorType::JsonMalformed);
+    VERIFY(!parser.has_errors());
+
+    // Create a Script record for evaluation
+    auto script = realm.heap().allocate<Script>(realm, script_string, move(program));
+
+    // Extract the JSON expression from the script for CreateJSONParseRecord
+    RefPtr<Expression const> json_expression;
+    if (script->parse_node().children().size() == 1) {
+        if (auto* expr_stmt = dynamic_cast<ExpressionStatement const*>(script->parse_node().children()[0].ptr())) {
+            json_expression = &expr_stmt->expression();
+        }
+    }
+    if (!json_expression)
+        return vm.throw_completion<SyntaxError>(ErrorType::JsonMalformed);
+
+    // 7. Let completion be Completion(Evaluation of script).
+    auto completion = vm.bytecode_interpreter().run(*script);
+
+    // 8. NOTE: The PropertyDefinitionEvaluation semantics defined in 13.2.5.5 have special handling for the above evaluation.
+
+    // 9. Let unfiltered be completion.[[Value]].
+    auto unfiltered = TRY(completion);
+
+    // 10. Assert: unfiltered is either a String, Number, Boolean, Null, or an Object that is defined by either an ArrayLiteral or an ObjectLiteral.
+    VERIFY(unfiltered.is_string() || unfiltered.is_number() || unfiltered.is_boolean() || unfiltered.is_null() || unfiltered.is_object());
+
+    // 11. If IsCallable(reviver) is true, then
     if (reviver.is_function()) {
         // a. Let root be OrdinaryObjectCreate(%Object.prototype%).
         auto root = Object::create(realm, realm.intrinsics().object_prototype());
@@ -439,12 +486,18 @@ JS_DEFINE_NATIVE_FUNCTION(JSONObject::parse)
         // c. Perform ! CreateDataPropertyOrThrow(root, rootName, unfiltered).
         MUST(root->create_data_property_or_throw(root_name, unfiltered));
 
-        // d. Return ? InternalizeJSONProperty(root, rootName, reviver).
-        return internalize_json_property(vm, root, root_name, reviver.as_function());
+        // d. Let snapshot be CreateJSONParseRecord(script, rootName, unfiltered).
+        auto json_string_utf16 = Utf16String::from_utf8(json_string);
+        auto snapshot = create_json_parse_record(vm, json_expression, root_name, unfiltered, Utf16View { json_string_utf16 });
+
+        // e. Return ? InternalizeJSONProperty(root, rootName, reviver, snapshot).
+        return internalize_json_property(vm, root, root_name, reviver.as_function(), snapshot, Utf16View { json_string_utf16 });
     }
-    // 4. Else,
-    //     a. Return unfiltered.
-    return unfiltered;
+    // 12. Else,
+    else {
+        // a. Return unfiltered.
+        return unfiltered;
+    }
 }
 
 // 25.5.1.1 ParseJSON ( text ), https://tc39.es/ecma262/#sec-ParseJSON
@@ -508,35 +561,447 @@ Array* JSONObject::parse_json_array(VM& vm, JsonArray const& json_array)
     return array;
 }
 
-// 25.5.1.1 InternalizeJSONProperty ( holder, name, reviver ), https://tc39.es/ecma262/#sec-internalizejsonproperty
-ThrowCompletionOr<Value> JSONObject::internalize_json_property(VM& vm, Object* holder, PropertyKey const& name, FunctionObject& reviver)
+// 2 Static Semantics: ArrayLiteralContentNodes, https://tc39.es/proposal-json-parse-with-source/#sec-arrayliteralcontentnodes
+static Vector<RefPtr<Expression const>> array_literal_content_nodes(ArrayExpression const& array_literal)
 {
-    auto value = TRY(holder->get(name));
-    if (value.is_object()) {
-        auto is_array = TRY(value.is_array(vm));
+    Vector<RefPtr<Expression const>> elements;
+    for (auto const& element : array_literal.elements()) {
+        elements.append(element);
+    }
+    return elements;
+}
 
-        auto& value_object = value.as_object();
-        auto process_property = [&](PropertyKey const& key) -> ThrowCompletionOr<void> {
-            auto element = TRY(internalize_json_property(vm, &value_object, key, reviver));
-            if (element.is_undefined())
-                TRY(value_object.internal_delete(key));
-            else
-                TRY(value_object.create_data_property(key, element));
-            return {};
-        };
+// 3 Static Semantics: PropertyDefinitionNodes, https://tc39.es/proposal-json-parse-with-source/#sec-propertydefinitionnodes
+static Vector<NonnullRefPtr<ObjectProperty const>> property_definition_nodes(ObjectExpression const& object_literal)
+{
+    Vector<NonnullRefPtr<ObjectProperty const>> properties;
+    for (auto const& property : object_literal.properties()) {
+        properties.append(property);
+    }
+    return properties;
+}
 
-        if (is_array) {
-            auto length = TRY(length_of_array_like(vm, value_object));
-            for (size_t i = 0; i < length; ++i)
-                TRY(process_property(i));
-        } else {
-            auto property_list = TRY(value_object.enumerable_own_property_names(Object::PropertyKind::Key));
-            for (auto& property_key : property_list)
-                TRY(process_property(property_key.as_string().utf16_string()));
+// Helper to get PropName from a PropertyDefinition
+static Optional<Utf16String> prop_name_of(ObjectProperty const& property)
+{
+    if (property.type() != ObjectProperty::Type::KeyValue)
+        return {};
+
+    if (auto* identifier = dynamic_cast<Identifier const*>(&property.key())) {
+        return Utf16String { identifier->string() };
+    } else if (auto* string_literal = dynamic_cast<StringLiteral const*>(&property.key())) {
+        return string_literal->value();
+    }
+
+    return {};
+}
+
+// 1.2.4 Static Semantics: ShallowestContainedJSONValue, https://tc39.es/proposal-json-parse-with-source/#sec-shallowestcontainedjsonvalue
+static RefPtr<Expression const> shallowest_contained_json_value(Expression const* node)
+{
+    // 1. Let F be the active function object.
+    // 2. Assert: F is a JSON.parse built-in function object (see JSON.parse).
+
+    // 3. Let types be « NullLiteral, BooleanLiteral, NumericLiteral, StringLiteral, ArrayLiteral, ObjectLiteral, UnaryExpression ».
+    enum class JSONValueType {
+        NullLiteral,
+        BooleanLiteral,
+        NumericLiteral,
+        StringLiteral,
+        ArrayLiteral,
+        ObjectLiteral,
+        UnaryExpression
+    };
+
+    Vector<JSONValueType> types = {
+        JSONValueType::NullLiteral,
+        JSONValueType::BooleanLiteral,
+        JSONValueType::NumericLiteral,
+        JSONValueType::StringLiteral,
+        JSONValueType::ArrayLiteral,
+        JSONValueType::ObjectLiteral,
+        JSONValueType::UnaryExpression
+    };
+
+    // 4. Let unaryExpression be empty.
+    RefPtr<Expression const> unary_expression;
+
+    // 5. Let queue be « this Parse Node ».
+    Vector<Expression const*> queue;
+    queue.append(node);
+
+    // 6. Repeat, while queue is not empty,
+    while (!queue.is_empty()) {
+        // a. Let candidate be the first element of queue.
+        auto const* candidate = queue.first();
+
+        // b. Remove the first element from queue.
+        queue.take_first();
+
+        // c. Let queuedChildren be false.
+        bool queued_children = false;
+
+        // d. For each nonterminal type of types, do
+        for (auto type : types) {
+            // i. If candidate is an instance of type, then
+            bool is_instance = false;
+
+            switch (type) {
+            case JSONValueType::NullLiteral:
+                is_instance = is<NullLiteral>(candidate);
+                break;
+            case JSONValueType::BooleanLiteral:
+                is_instance = is<BooleanLiteral>(candidate);
+                break;
+            case JSONValueType::NumericLiteral:
+                is_instance = is<NumericLiteral>(candidate);
+                break;
+            case JSONValueType::StringLiteral:
+                is_instance = is<StringLiteral>(candidate);
+                break;
+            case JSONValueType::ArrayLiteral:
+                is_instance = is<ArrayExpression>(candidate);
+                break;
+            case JSONValueType::ObjectLiteral:
+                is_instance = is<ObjectExpression>(candidate);
+                break;
+            case JSONValueType::UnaryExpression:
+                is_instance = is<UnaryExpression>(candidate) && static_cast<UnaryExpression const*>(candidate)->op() == UnaryOp::Minus;
+                break;
+            }
+
+            if (is_instance) {
+                // 1. NOTE: In the JSON grammar, a number token may represent a negative value.
+                //    In ECMAScript, negation is represented as a unary operation.
+
+                // 2. If type is UnaryExpression, then
+                if (type == JSONValueType::UnaryExpression) {
+                    // a. Set unaryExpression to candidate.
+                    unary_expression = candidate;
+                }
+                // 3. Else if type is NumericLiteral, then
+                else if (type == JSONValueType::NumericLiteral) {
+                    // FIXME: NumericLiteral can exist without a UnaryExpression, so this if check is needed, but it doesn't match the spec.
+                    // a. Assert: unaryExpression Contains candidate is true.
+                    if (unary_expression) {
+                        auto const* unary = static_cast<UnaryExpression const*>(unary_expression.ptr());
+                        VERIFY(&unary->lhs() == candidate);
+                        // b. Return unaryExpression.
+                        return unary_expression;
+                    }
+                    // b. Return unaryExpression (or just the literal if no unary).
+                    return candidate;
+                }
+                // 4. Else,
+                else {
+                    // a. Return candidate.
+                    return candidate;
+                }
+            }
+
+            // ii. If queuedChildren is false and candidate is an instance of a nonterminal and candidate Contains type is true, then
+            if (!queued_children) {
+                // Check if candidate is a nonterminal (all Expression nodes are nonterminals).
+                // Check if candidate could contain nodes of 'type' (we need to check if continuing search makes sense).
+
+                // For each type, check if candidate could possibly contain that type.
+                // We simplify by checking if candidate is a compound expression that could have children.
+                bool could_contain_type = false;
+
+                // UnaryExpression can contain literals
+                if (auto* unary = dynamic_cast<UnaryExpression const*>(candidate)) {
+                    could_contain_type = true;
+
+                    if (could_contain_type) {
+                        // 1. Let children be a List containing each child node of candidate, in order.
+                        Vector<Expression const*> children;
+                        children.append(&unary->lhs());
+
+                        // 2. Set queue to the list-concatenation of queue and children.
+                        for (auto const* child : children) {
+                            queue.append(child);
+                        }
+
+                        // 3. Set queuedChildren to true.
+                        queued_children = true;
+                    }
+                }
+                // Note: We could add more expression types here, but for JSON.parse context,
+                // only UnaryExpression is relevant as a wrapper around NumericLiteral.
+                // ArrayExpression and ObjectExpression are terminal JSON values (they match and return immediately).
+            }
         }
     }
 
-    return TRY(call(vm, reviver, holder, PrimitiveString::create(vm, name.to_string()), value));
+    // 7. Return empty.
+    return nullptr;
+}
+
+// Helper to extract source text from an AST node using the original JSON source
+// The parse node's source range is relative to the wrapped script "(json);",
+// so we need to adjust offsets by -1 to account for the leading "(" and use the original JSON string
+static String get_source_text_from_node(Expression const* node, Utf16View const& original_json_source)
+{
+    if (!node)
+        return String {};
+
+    auto source_range = node->source_range();
+
+    // The source range is relative to the wrapped script "(json);"
+    // We need to adjust by -1 for the leading "(" to get the position in the original JSON
+    auto start_offset = source_range.start.offset;
+    auto end_offset = source_range.end.offset;
+
+    // Adjust for the wrapping parenthesis
+    if (start_offset > 0)
+        start_offset--;
+    if (end_offset > 0)
+        end_offset--;
+
+    if (start_offset >= original_json_source.length_in_code_units() || end_offset > original_json_source.length_in_code_units())
+        return String {};
+
+    auto length = end_offset - start_offset;
+
+    if (length == 0)
+        return String {};
+
+    auto view = original_json_source.substring_view(start_offset, length);
+    auto source_text = MUST(view.to_utf8());
+
+    return MUST(source_text.trim(" \t\r\n"sv, TrimMode::Both));
+}
+
+// FIXEME: remove original_source argument and extract it from parse_node instead
+// 1.2.2 CreateJSONParseRecord ( parseNode, key, val ), https://tc39.es/proposal-json-parse-with-source/#sec-createjsonparserecord
+JSONObject::JSONParseRecord JSONObject::create_json_parse_record(VM& vm, RefPtr<Expression const> parse_node, PropertyKey const& key, Value const& val, Utf16View const& original_source)
+{
+    // 1. Let typedValNode be ShallowestContainedJSONValue of parseNode.
+    auto typed_val_node = shallowest_contained_json_value(parse_node.ptr());
+
+    // 2. Assert: typedValNode is not empty.
+    VERIFY(typed_val_node);
+
+    // 3. Let elements be a new empty List.
+    Vector<JSONParseRecord> elements;
+
+    // 4. Let entries be a new empty List.
+    Vector<JSONParseRecord> entries;
+
+    // 5. If val is an Object, then
+    if (val.is_object()) {
+        auto& val_object = val.as_object();
+
+        // a. Let isArray be ! IsArray(val).
+        auto is_array = MUST(val.is_array(vm));
+
+        // b. If isArray is true, then
+        if (is_array) {
+            // i. Assert: typedValNode is an ArrayLiteral Parse Node.
+            VERIFY(is<ArrayExpression>(typed_val_node.ptr()));
+            auto const& array_literal = static_cast<ArrayExpression const&>(*typed_val_node);
+
+            // ii. Let contentNodes be ArrayLiteralContentNodes of typedValNode.
+            auto content_nodes = array_literal_content_nodes(array_literal);
+
+            // iii. Let len be the number of elements in contentNodes.
+            auto len = content_nodes.size();
+
+            // iv. Let valLen be ! LengthOfArrayLike(val).
+            auto val_len = MUST(length_of_array_like(vm, val_object));
+
+            // v. Assert: valLen = len.
+            VERIFY(val_len == len);
+
+            // vi. Let I be 0.
+            size_t i = 0;
+
+            // vii. Repeat, while I < len,
+            while (i < len) {
+                // 1. Let propName be ! ToString(𝔽(I)).
+                auto prop_name = PropertyKey { i };
+
+                // 2. Let elementParseRecord be CreateJSONParseRecord(contentNodes[I], propName, ! Get(val, propName)).
+                auto element_value = MUST(val_object.get(prop_name));
+                auto element_parse_record = create_json_parse_record(vm, content_nodes[i], prop_name, element_value, original_source);
+
+                // 3. Append elementParseRecord to elements.
+                elements.append(move(element_parse_record));
+
+                // 4. Set I to I + 1.
+                i = i + 1;
+            }
+        }
+        // c. Else,
+        else {
+            // i. Assert: typedValNode is an ObjectLiteral Parse Node.
+            VERIFY(is<ObjectExpression>(typed_val_node.ptr()));
+            auto const& object_literal = static_cast<ObjectExpression const&>(*typed_val_node);
+
+            // ii. Let propertyNodes be PropertyDefinitionNodes of typedValNode.
+            auto property_nodes = property_definition_nodes(object_literal);
+
+            // iii. NOTE: Because val was produced from JSON text and has not been modified, all of its property keys are Strings and will be exhaustively enumerated in source text order.
+
+            // iv. Let keys be ! EnumerableOwnProperties(val, key).
+            auto keys = MUST(val_object.enumerable_own_property_names(Object::PropertyKind::Key));
+
+            // v. For each String P of keys, do
+            for (auto& key_value : keys) {
+                auto P = key_value.as_string().utf16_string();
+
+                // 1. NOTE: In the case of JSON text specifying multiple name/value pairs with the same name for a single object (such as {"a":"lost","a":"kept"}), the value for the corresponding property of the resulting ECMAScript object is specified by the last pair with that name.
+
+                // 2. Let propertyDefinition be empty.
+                RefPtr<ObjectProperty const> property_definition;
+
+                // 3. For each Parse Node propertyNode of propertyNodes, do
+                for (auto const& property_node : property_nodes) {
+                    // a. Let propName be PropName of propertyNode.
+                    auto prop_name = prop_name_of(*property_node);
+
+                    // b. If SameValue(propName, P) is true, set propertyDefinition to propertyNode.
+                    if (prop_name.has_value() && *prop_name == P) {
+                        property_definition = property_node;
+                    }
+                }
+
+                // 4. Assert: propertyDefinition is PropertyDefinition : PropertyName : AssignmentExpression .
+                VERIFY(property_definition);
+                VERIFY(property_definition->type() == ObjectProperty::Type::KeyValue);
+
+                // 5. Let propertyValueNode be the AssignmentExpression of propertyDefinition.
+                auto const& property_value_node = property_definition->value();
+
+                // 6. Let entryParseRecord be CreateJSONParseRecord(propertyValueNode, P, ! Get(val, P)).
+                auto property_value = MUST(val_object.get(P));
+                auto entry_parse_record = create_json_parse_record(vm, &property_value_node, P, property_value, original_source);
+
+                // 7. Append entryParseRecord to entries.
+                entries.append(move(entry_parse_record));
+            }
+        }
+    }
+    // 6. Else,
+    //     a. Assert: typedValNode is not an ArrayLiteral Parse Node and not an ObjectLiteral Parse Node.
+    else {
+        VERIFY(!is<ArrayExpression>(typed_val_node.ptr()) && !is<ObjectExpression>(typed_val_node.ptr()));
+    }
+
+    // 7. Return the JSON Parse Record { [[ParseNode]]: typedValNode, [[Key]]: key, [[Value]]: val, [[Elements]]: elements, [[Entries]]: entries }.
+    return JSONParseRecord { typed_val_node, key, val, move(elements), move(entries) };
+}
+
+// FIXME: remove original_source argument and extract it from parse_record instead
+// 1.2.3 InternalizeJSONProperty ( holder, name, reviver, parseRecord ), https://tc39.es/proposal-json-parse-with-source/#sec-internalizejsonproperty
+// 25.5.1.1 InternalizeJSONProperty ( holder, name, reviver ), https://tc39.es/ecma262/#sec-internalizejsonproperty
+ThrowCompletionOr<Value> JSONObject::internalize_json_property(VM& vm, Object* holder, PropertyKey const& name, FunctionObject& reviver, Optional<JSONParseRecord> parse_record, Utf16View const& original_source)
+{
+    auto& realm = *vm.current_realm();
+
+    // 1. Let val be ? Get(holder, name).
+    auto val = TRY(holder->get(name));
+
+    // 2. Let context be OrdinaryObjectCreate(%Object.prototype%).
+    auto context = Object::create(realm, realm.intrinsics().object_prototype());
+
+    Vector<JSONParseRecord> element_records;
+    Vector<JSONParseRecord> entry_records;
+
+    // 3. If parseRecord is a JSON Parse Record and SameValue(parseRecord.[[Value]], val) is true, then
+    if (parse_record.has_value() && same_value(parse_record->value, val)) {
+        // a. If val is not an Object, then
+        if (!val.is_object()) {
+            // i. Let parseNode be parseRecord.[[ParseNode]].
+            auto parse_node = parse_record->parse_node;
+
+            // ii. Assert: parseNode is not an ArrayLiteral Parse Node and not an ObjectLiteral Parse Node.
+            VERIFY(parse_node && !is<ArrayExpression>(parse_node.ptr()) && !is<ObjectExpression>(parse_node.ptr()));
+
+            // iii. Let sourceText be the source text matched by parseNode.
+            auto source_text = get_source_text_from_node(parse_node.ptr(), original_source);
+
+            // iv. Perform ! CreateDataPropertyOrThrow(context, "source", CodePointsToString(sourceText)).
+            MUST(context->create_data_property_or_throw(vm.names.source, PrimitiveString::create(vm, source_text)));
+        }
+        // b. Let elementRecords be parseRecord.[[Elements]].
+        element_records = parse_record->elements;
+        // c. Let entryRecords be parseRecord.[[Entries]].
+        entry_records = parse_record->entries;
+    }
+
+    // 4. Else,
+    //     a. Let elementRecords be a new empty List.
+    //     b. Let entryRecords be a new empty List.
+
+    // 5. If val is an Object, then
+    if (val.is_object()) {
+        // a. Let isArray be ? IsArray(val).
+        auto is_array = TRY(val.is_array(vm));
+
+        auto& val_object = val.as_object();
+
+        // b. If isArray is true, then
+        if (is_array) {
+            // ii. Let len be ? LengthOfArrayLike(val).
+            auto len = TRY(length_of_array_like(vm, val_object));
+            // iii. Let I be 0.
+            // iv. Repeat, while I < len,
+            for (size_t i = 0; i < len; ++i) {
+                // 1. Let prop be ! ToString(𝔽(I)).
+                auto prop = PropertyKey { i };
+                // 2. If I < elementRecordsLen, let elementRecord be elementRecords[I]. Otherwise, let elementRecord be empty.
+                Optional<JSONParseRecord> element_record;
+                if (i < element_records.size())
+                    element_record = element_records[i];
+                // 3. Let newElement be ? InternalizeJSONProperty(val, prop, reviver, elementRecord).
+                auto new_element = TRY(internalize_json_property(vm, &val_object, prop, reviver, element_record, original_source));
+                // 4. If newElement is undefined, then
+                if (new_element.is_undefined()) {
+                    // a. Perform ? val.[[Delete]](prop).
+                    TRY(val_object.internal_delete(prop));
+                }
+                // 5. Else,
+                else {
+                    // a. Perform ? CreateDataProperty(val, prop, newElement).
+                    TRY(val_object.create_data_property(prop, new_element));
+                }
+                // 6. Set I to I + 1.
+            }
+        }
+        // c. Else,
+        else {
+            // i. Let keys be ? EnumerableOwnProperties(val, key).
+            auto keys = TRY(val_object.enumerable_own_property_names(Object::PropertyKind::Key));
+            // ii. For each String P of keys, do
+            for (auto& property_key : keys) {
+                auto p = property_key.as_string().utf16_string();
+                // 1. Let entryRecord be the element of entryRecords whose [[Key]] field is P. If there is no such element, let entryRecord be empty.
+                Optional<JSONParseRecord> entry_record;
+                for (auto& record : entry_records) {
+                    if (record.key == PropertyKey { p }) {
+                        entry_record = record;
+                        break;
+                    }
+                }
+                // 2. Let newElement be ? InternalizeJSONProperty(val, P, reviver, entryRecord).
+                auto new_element = TRY(internalize_json_property(vm, &val_object, p, reviver, entry_record, original_source));
+                // 3. If newElement is undefined, then
+                if (new_element.is_undefined()) {
+                    // a. Perform ? val.[[Delete]](P).
+                    TRY(val_object.internal_delete(p));
+                }
+                // 4. Else,
+                else {
+                    // a. Perform ? CreateDataProperty(val, P, newElement).
+                    TRY(val_object.create_data_property(p, new_element));
+                }
+            }
+        }
+    }
+
+    // 6. Return ? Call(reviver, holder, « name, val, context »).
+    return TRY(call(vm, reviver, holder, PrimitiveString::create(vm, name.to_string()), val, context));
 }
 
 // 1.3 JSON.rawJSON ( text ), https://tc39.es/proposal-json-parse-with-source/#sec-json.rawjson

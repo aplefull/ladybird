@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <LibJS/AST.h>
 #include <LibJS/Export.h>
 #include <LibJS/Runtime/Object.h>
 
@@ -37,6 +38,33 @@ private:
         Optional<Vector<Utf16String>> property_list;
     };
 
+    // 1.2.1 JSON Parse Record, https://tc39.es/proposal-json-parse-with-source/#sec-json-parse-record
+    struct JSONParseRecord {
+        // [[ParseNode]]: a Parse Node (we store the Expression AST node)
+        RefPtr<Expression const> parse_node;
+
+        // [[Key]]: a property key
+        PropertyKey key;
+
+        // [[Value]]: an ECMAScript language value
+        Value value;
+
+        // [[Elements]]: a List of JSON Parse Records
+        Vector<JSONParseRecord> elements;
+
+        // [[Entries]]: a List of JSON Parse Records
+        Vector<JSONParseRecord> entries;
+
+        JSONParseRecord(RefPtr<Expression const> node, PropertyKey k, Value v, Vector<JSONParseRecord> elems = {}, Vector<JSONParseRecord> ents = {})
+            : parse_node(move(node))
+            , key(k)
+            , value(v)
+            , elements(move(elems))
+            , entries(move(ents))
+        {
+        }
+    };
+
     // Stringify helpers
     static ThrowCompletionOr<Optional<String>> serialize_json_property(VM&, StringifyState&, PropertyKey const& key, Object* holder);
     static ThrowCompletionOr<String> serialize_json_object(VM&, StringifyState&, Object&);
@@ -46,7 +74,8 @@ private:
     // Parse helpers
     static Object* parse_json_object(VM&, JsonObject const&);
     static Array* parse_json_array(VM&, JsonArray const&);
-    static ThrowCompletionOr<Value> internalize_json_property(VM&, Object* holder, PropertyKey const& name, FunctionObject& reviver);
+    static JSONParseRecord create_json_parse_record(VM&, RefPtr<Expression const> parse_node, PropertyKey const& key, Value const& val, Utf16View const& original_source);
+    static ThrowCompletionOr<Value> internalize_json_property(VM&, Object* holder, PropertyKey const& name, FunctionObject& reviver, Optional<JSONParseRecord> parse_record, Utf16View const& original_source);
 
     JS_DECLARE_NATIVE_FUNCTION(stringify);
     JS_DECLARE_NATIVE_FUNCTION(parse);

@@ -1465,10 +1465,12 @@ NonnullRefPtr<ClassExpression const> Parser::parse_class_expression(bool expect_
 
             if (match_property_key() || match(TokenType::PrivateIdentifier)) {
                 switch (m_state.current_token.type()) {
-                case TokenType::Identifier:
+                case TokenType::Identifier: {
                     name = consume().fly_string_value();
-                    property_key = create_ast_node<StringLiteral>({ m_source_code, rule_start.position(), position() }, name.to_utf16_string());
+                    auto key_position = position();
+                    property_key = create_ast_node<StringLiteral>({ m_source_code, rule_start.position(), key_position }, name.to_utf16_string());
                     break;
+                }
                 case TokenType::PrivateIdentifier:
                     name = consume().fly_string_value();
                     if (name == "#constructor"sv)
@@ -1765,17 +1767,24 @@ Parser::PrimaryExpressionParseResult Parser::parse_primary_expression()
             syntax_error(MUST(String::formatted("Identifier must not be a reserved word in strict mode ('{}')", string)));
         return { parse_identifier() };
     }
-    case TokenType::NumericLiteral:
-        return { create_ast_node<NumericLiteral>({ m_source_code, rule_start.position(), position() }, consume_and_validate_numeric_literal().double_value()) };
-    case TokenType::BigIntLiteral:
-        return { create_ast_node<BigIntLiteral>({ m_source_code, rule_start.position(), position() }, MUST(consume().value().to_byte_string())) };
-    case TokenType::BoolLiteral:
-        return { create_ast_node<BooleanLiteral>({ m_source_code, rule_start.position(), position() }, consume_and_allow_division().bool_value()) };
+    case TokenType::NumericLiteral: {
+        auto value = consume_and_validate_numeric_literal().double_value();
+        return { create_ast_node<NumericLiteral>({ m_source_code, rule_start.position(), position() }, value) };
+    }
+    case TokenType::BigIntLiteral: {
+        auto value = MUST(consume().value().to_byte_string());
+        return { create_ast_node<BigIntLiteral>({ m_source_code, rule_start.position(), position() }, move(value)) };
+    }
+    case TokenType::BoolLiteral: {
+        auto value = consume_and_allow_division().bool_value();
+        return { create_ast_node<BooleanLiteral>({ m_source_code, rule_start.position(), position() }, value) };
+    }
     case TokenType::StringLiteral:
         return { parse_string_literal(consume()) };
-    case TokenType::NullLiteral:
+    case TokenType::NullLiteral: {
         consume_and_allow_division();
         return { create_ast_node<NullLiteral>({ m_source_code, rule_start.position(), position() }) };
+    }
     case TokenType::CurlyOpen:
         return { parse_object_expression() };
     case TokenType::Async: {
@@ -1945,30 +1954,48 @@ NonnullRefPtr<Expression const> Parser::parse_unary_prefixed_expression()
     case TokenType::ExclamationMark:
         consume();
         verify_next_token_is_not_exponentiation();
-        return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Not, parse_expression(precedence, associativity));
+        {
+            auto operand = parse_expression(precedence, associativity);
+            return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Not, move(operand));
+        }
     case TokenType::Tilde:
         consume();
         verify_next_token_is_not_exponentiation();
-        return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::BitwiseNot, parse_expression(precedence, associativity));
+        {
+            auto operand = parse_expression(precedence, associativity);
+            return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::BitwiseNot, move(operand));
+        }
     case TokenType::Plus:
         consume();
         verify_next_token_is_not_exponentiation();
-        return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Plus, parse_expression(precedence, associativity));
+        {
+            auto operand = parse_expression(precedence, associativity);
+            return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Plus, move(operand));
+        }
     case TokenType::Minus:
         consume();
         verify_next_token_is_not_exponentiation();
-        return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Minus, parse_expression(precedence, associativity));
+        {
+            auto operand = parse_expression(precedence, associativity);
+            return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Minus, move(operand));
+        }
     case TokenType::Typeof:
         consume();
         verify_next_token_is_not_exponentiation();
-        return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Typeof, parse_expression(precedence, associativity));
+        {
+            auto operand = parse_expression(precedence, associativity);
+            return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Typeof, move(operand));
+        }
     case TokenType::Void:
         consume();
         verify_next_token_is_not_exponentiation();
         // FIXME: This check is really hiding the fact that we don't deal with different expressions correctly.
         if (match(TokenType::Yield) && m_state.in_generator_function_context)
             syntax_error("'yield' is not an identifier in generator function context"_string);
-        return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Void, parse_expression(precedence, associativity));
+        {
+            auto operand = parse_expression(precedence, associativity);
+            return create_ast_node<UnaryExpression>({ m_source_code, rule_start.position(), position() }, UnaryOp::Void, move(operand));
+        }
     case TokenType::Delete: {
         consume();
         verify_next_token_is_not_exponentiation();
@@ -1997,9 +2024,11 @@ NonnullRefPtr<Expression const> Parser::parse_property_key()
     if (match(TokenType::StringLiteral)) {
         return parse_string_literal(consume());
     } else if (match(TokenType::NumericLiteral)) {
-        return create_ast_node<NumericLiteral>({ m_source_code, rule_start.position(), position() }, consume().double_value());
+        auto value = consume().double_value();
+        return create_ast_node<NumericLiteral>({ m_source_code, rule_start.position(), position() }, value);
     } else if (match(TokenType::BigIntLiteral)) {
-        return create_ast_node<BigIntLiteral>({ m_source_code, rule_start.position(), position() }, MUST(consume().value().to_byte_string()));
+        auto value = MUST(consume().value().to_byte_string());
+        return create_ast_node<BigIntLiteral>({ m_source_code, rule_start.position(), position() }, move(value));
     } else if (match(TokenType::BracketOpen)) {
         consume(TokenType::BracketOpen);
         auto result = parse_expression(2);
@@ -2008,7 +2037,8 @@ NonnullRefPtr<Expression const> Parser::parse_property_key()
     } else {
         if (!match_identifier_name())
             expected("IdentifierName");
-        return create_ast_node<StringLiteral>({ m_source_code, rule_start.position(), position() }, consume().fly_string_value().to_utf16_string());
+        auto value = consume().fly_string_value().to_utf16_string();
+        return create_ast_node<StringLiteral>({ m_source_code, rule_start.position(), position() }, move(value));
     }
 }
 
@@ -2128,11 +2158,12 @@ NonnullRefPtr<ObjectExpression const> Parser::parse_object_expression()
             }
             consume();
             if (is_proto) {
-                if (has_direct_proto_property)
+                // https://tc39.es/ecma262/#sec-object-initializer-static-semantics-early-errors
+                if (has_direct_proto_property && !m_state.is_parsing_for_json_parse)
                     syntax_error("Property name '__proto__' must not appear more than once in object literal"_string);
                 has_direct_proto_property = true;
             }
-            if (is_proto && property_type == ObjectProperty::Type::KeyValue)
+            if (is_proto && property_type == ObjectProperty::Type::KeyValue && !m_state.is_parsing_for_json_parse)
                 property_type = ObjectProperty::Type::ProtoSetter;
 
             auto rhs_expression = parse_expression(2);
@@ -2201,7 +2232,33 @@ NonnullRefPtr<ArrayExpression const> Parser::parse_array_expression()
 
 NonnullRefPtr<StringLiteral const> Parser::parse_string_literal(Token const& token, StringLiteralType string_literal_type, bool* contains_invalid_escape)
 {
-    auto rule_start = push_start();
+    // Note: The token was already consumed before calling this function,
+    // so we need to use the token's position information, not push_start()
+
+    // token.offset() points to start of trivia (whitespace before token)
+    // token.trivia() is the whitespace/comments before the actual token text
+    // token.original_value() is the token text WITHOUT quotes (for strings, this is the content)
+    // We need the source range to include the quotes for JSON source text
+
+    // The Lexer sets token.offset() to point AFTER consuming the opening quote for strings,
+    // so we need to back up by 1 to include the opening quote in the source range.
+    // token.trivia() contains whitespace before the token.
+    // token.original_value() contains the FULL token text including quotes.
+
+    auto token_start_offset = token.offset() + token.trivia().length_in_code_units();
+    auto& source = m_source_code->code();
+
+    // For string tokens, the lexer has already consumed the opening quote,
+    // so token_start_offset points INSIDE the string (after the opening quote).
+    // We need to back up by 1 to include the opening quote - but only if we're not already at the quote.
+    if (token_start_offset > 0 && token_start_offset < source.length_in_code_units() && source.code_unit_at(token_start_offset) != '"') {
+        token_start_offset--;
+    }
+
+    // Use original_value which includes the quotes
+    auto token_length = token.original_value().length_in_code_units();
+    auto token_end_offset = token_start_offset + token_length;
+
     auto status = Token::StringValueStatus::Ok;
     auto string = token.string_value(status);
     // NOTE: Tagged templates should not fail on invalid strings as their raw contents can still be accessed.
@@ -2233,7 +2290,9 @@ NonnullRefPtr<StringLiteral const> Parser::parse_string_literal(Token const& tok
         }
     }
 
-    return create_ast_node<StringLiteral>({ m_source_code, rule_start.position(), position() }, move(string));
+    Position start_position { token.line_number(), token.line_column(), token_start_offset };
+    Position end_position { token.line_number(), token.line_column(), token_end_offset };
+    return create_ast_node<StringLiteral>({ m_source_code, start_position, end_position }, move(string));
 }
 
 NonnullRefPtr<TemplateLiteral const> Parser::parse_template_literal(bool is_tagged)
