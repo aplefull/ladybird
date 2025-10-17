@@ -196,8 +196,21 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
         if (state.matches.size() == input.match_index)
             state.matches.empend();
 
-        VERIFY(start_position + state.string_position - start_position <= input.view.length());
-        state.matches.mutable_at(input.match_index) = { input.view.substring_view(start_position, state.string_position - start_position), input.line, start_position, input.global_offset + start_position };
+        size_t start_position_in_code_units;
+        if (input.view.unicode()) {
+            if (start_position >= input.view.length())
+                start_position_in_code_units = input.view.length_in_code_units();
+            else
+                start_position_in_code_units = input.view.code_unit_offset_of(start_position);
+        } else {
+            start_position_in_code_units = start_position;
+        }
+        auto length_in_code_units = state.string_position_in_code_units - start_position_in_code_units;
+
+        VERIFY(start_position_in_code_units + length_in_code_units <= input.view.length_in_code_units());
+
+        auto match_offset = input.view.unicode() ? (input.global_offset + start_position) : (input.global_offset + start_position_in_code_units);
+        state.matches.mutable_at(input.match_index) = { input.view.substring_view(start_position_in_code_units, length_in_code_units), input.line, start_position_in_code_units, match_offset };
     };
 
 #if REGEX_DEBUG
@@ -237,10 +250,17 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
         input.view = view;
         dbgln_if(REGEX_DEBUG, "[match] Starting match with view ({}): _{}_", view.length(), view);
 
-        auto view_length = view.length_in_code_units();
+        auto view_length = view.length();
         size_t view_index = m_pattern->start_offset;
         state.string_position = view_index;
-        state.string_position_in_code_units = view_index;
+        if (view.unicode()) {
+            if (view_index >= view_length)
+                state.string_position_in_code_units = view.length_in_code_units();
+            else
+                state.string_position_in_code_units = view.code_unit_offset_of(view_index);
+        } else {
+            state.string_position_in_code_units = view_index;
+        }
         bool succeeded = false;
 
         if (view_index == view_length && m_pattern->parser_result.match_length_minimum == 0) {
@@ -291,7 +311,13 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
             auto const insensitive = input.regex_options.has_flag_set(AllFlags::Insensitive);
             if (auto& starting_ranges = m_pattern->parser_result.optimization_data.starting_ranges; !starting_ranges.is_empty()) {
                 auto ranges = insensitive ? m_pattern->parser_result.optimization_data.starting_ranges_insensitive.span() : starting_ranges.span();
-                auto ch = input.view.unicode_aware_code_point_at(view_index);
+                size_t code_unit_index;
+                if (input.view.unicode()) {
+                    code_unit_index = view_index < view_length ? input.view.code_unit_offset_of(view_index) : input.view.length_in_code_units();
+                } else {
+                    code_unit_index = view_index;
+                }
+                auto ch = input.view.unicode_aware_code_point_at(code_unit_index);
                 if (insensitive)
                     ch = to_ascii_lowercase(ch);
 
@@ -303,7 +329,14 @@ RegexResult Matcher<Parser>::match(Vector<RegexStringView> const& views, Optiona
             input.match_index = match_count;
 
             state.string_position = view_index;
-            state.string_position_in_code_units = view_index;
+            if (input.view.unicode()) {
+                if (view_index >= view_length)
+                    state.string_position_in_code_units = input.view.length_in_code_units();
+                else
+                    state.string_position_in_code_units = input.view.code_unit_offset_of(view_index);
+            } else {
+                state.string_position_in_code_units = view_index;
+            }
             state.instruction_position = 0;
             state.repetition_marks.clear();
 

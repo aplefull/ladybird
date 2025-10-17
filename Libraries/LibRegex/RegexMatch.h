@@ -161,15 +161,6 @@ public:
 
     RegexStringView substring_view(size_t offset, size_t length) const
     {
-        if (unicode()) {
-            auto view = m_view.visit(
-                [&](auto view) { return RegexStringView { view.substring_view(offset, length) }; },
-                [&](Utf16View const& view) { return RegexStringView { view.unicode_substring_view(offset, length) }; });
-
-            view.set_unicode(unicode());
-            return view;
-        }
-
         auto view = m_view.visit([&](auto view) { return RegexStringView { view.substring_view(offset, length) }; });
         view.set_unicode(unicode());
         return view;

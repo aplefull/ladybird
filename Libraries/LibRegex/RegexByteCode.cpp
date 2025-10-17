@@ -282,7 +282,8 @@ ALWAYS_INLINE ExecutionResult OpCode_CheckBegin::execute(MatchInput const& input
             return true;
 
         if (input.regex_options.has_flag_set(AllFlags::Multiline) && input.regex_options.has_flag_set(AllFlags::Internal_ConsiderNewline)) {
-            auto input_view = input.view.substring_view(state.string_position - 1, 1).code_point_at(0);
+            auto prev_code_unit_offset = input.view.unicode() ? input.view.code_unit_offset_of(state.string_position - 1) : state.string_position_in_code_units - 1;
+            auto input_view = input.view.code_point_at(prev_code_unit_offset);
             return input_view == '\r' || input_view == '\n' || input_view == LineSeparator || input_view == ParagraphSeparator;
         }
 
@@ -335,7 +336,7 @@ ALWAYS_INLINE ExecutionResult OpCode_CheckEnd::execute(MatchInput const& input, 
             return true;
 
         if (input.regex_options.has_flag_set(AllFlags::Multiline) && input.regex_options.has_flag_set(AllFlags::Internal_ConsiderNewline)) {
-            auto input_view = input.view.substring_view(state.string_position, 1).code_point_at(0);
+            auto input_view = input.view.code_point_at(state.string_position_in_code_units);
             return input_view == '\r' || input_view == '\n' || input_view == LineSeparator || input_view == ParagraphSeparator;
         }
 
@@ -369,7 +370,7 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveLeftCaptureGroup::execute(MatchInput co
                 state.flat_capture_group_matches.append({});
     }
 
-    state.mutable_capture_group_matches(input.match_index).at(id() - 1).left_column = state.string_position;
+    state.mutable_capture_group_matches(input.match_index).at(id() - 1).left_column = state.string_position_in_code_units;
     return ExecutionResult::Continue;
 }
 
@@ -377,12 +378,12 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveRightCaptureGroup::execute(MatchInput c
 {
     auto& match = state.capture_group_matches(input.match_index).at(id() - 1);
     auto start_position = match.left_column;
-    if (state.string_position < start_position) {
-        dbgln("Right capture group {} is before left capture group {}!", state.string_position, start_position);
+    if (state.string_position_in_code_units < start_position) {
+        dbgln("Right capture group {} is before left capture group {}!", state.string_position_in_code_units, start_position);
         return ExecutionResult::Failed_ExecuteLowPrioForks;
     }
 
-    auto length = state.string_position - start_position;
+    auto length = state.string_position_in_code_units - start_position;
 
     if (start_position < match.column)
         return ExecutionResult::Continue;
@@ -398,7 +399,7 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveRightCaptureGroup::execute(MatchInput c
     auto& existing_capture = state.mutable_capture_group_matches(input.match_index).at(id() - 1);
     if (length == 0 && !existing_capture.view.is_null() && existing_capture.view.length() > 0) {
         auto existing_end_position = existing_capture.global_offset - input.global_offset + existing_capture.view.length();
-        if (existing_end_position == state.string_position) {
+        if (existing_end_position == state.string_position_in_code_units) {
             return ExecutionResult::Continue;
         }
     }
@@ -412,10 +413,10 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveRightNamedCaptureGroup::execute(MatchIn
 {
     auto& match = state.capture_group_matches(input.match_index).at(id() - 1);
     auto start_position = match.left_column;
-    if (state.string_position < start_position)
+    if (state.string_position_in_code_units < start_position)
         return ExecutionResult::Failed_ExecuteLowPrioForks;
 
-    auto length = state.string_position - start_position;
+    auto length = state.string_position_in_code_units - start_position;
 
     if (start_position < match.column)
         return ExecutionResult::Continue;
@@ -429,7 +430,7 @@ ALWAYS_INLINE ExecutionResult OpCode_SaveRightNamedCaptureGroup::execute(MatchIn
     auto& existing_capture = state.mutable_capture_group_matches(input.match_index).at(id() - 1);
     if (length == 0 && !existing_capture.view.is_null() && existing_capture.view.length() > 0) {
         auto existing_end_position = existing_capture.global_offset - input.global_offset + existing_capture.view.length();
-        if (existing_end_position == state.string_position) {
+        if (existing_end_position == state.string_position_in_code_units) {
             return ExecutionResult::Continue;
         }
     }
@@ -512,7 +513,7 @@ ALWAYS_INLINE ExecutionResult OpCode_Compare::execute(MatchInput const& input, M
             if (input.view.length() <= state.string_position)
                 return ExecutionResult::Failed_ExecuteLowPrioForks;
 
-            auto input_view = input.view.substring_view(state.string_position, 1).code_point_at(0);
+            auto input_view = input.view.unicode_aware_code_point_at(state.string_position_in_code_units);
             auto is_equivalent_to_newline = input_view == '\n'
                 || (input.regex_options.has_flag_set(AllFlags::Internal_ECMA262DotSemantics)
                         ? (input_view == '\r' || input_view == LineSeparator || input_view == ParagraphSeparator)
@@ -795,10 +796,7 @@ ALWAYS_INLINE void OpCode_Compare::compare_char(MatchInput const& input, MatchSt
     if (state.string_position == input.view.length())
         return;
 
-    // FIXME: Figure out how to do this if unicode() without performing a substring split first.
-    auto input_view = input.view.unicode()
-        ? input.view.substring_view(state.string_position, 1).code_point_at(0)
-        : input.view.unicode_aware_code_point_at(state.string_position_in_code_units);
+    auto input_view = input.view.unicode_aware_code_point_at(state.string_position_in_code_units);
 
     bool equal;
     if (input.regex_options & AllFlags::Insensitive) {
@@ -843,7 +841,7 @@ ALWAYS_INLINE bool OpCode_Compare::compare_string(MatchInput const& input, Match
         return !inverse_matched;
     }
 
-    auto subject = input.view.substring_view(state.string_position, str.length());
+    auto subject = input.view.substring_view(state.string_position_in_code_units, str.length_in_code_units());
     bool equals;
     if (input.regex_options & AllFlags::Insensitive)
         equals = subject.equals_ignoring_case(str);
