@@ -25,6 +25,7 @@ using ByteCodeValueType = u64;
 
 #define ENUMERATE_OPCODES                          \
     __ENUMERATE_OPCODE(Compare)                    \
+    __ENUMERATE_OPCODE(CompareStringSet)           \
     __ENUMERATE_OPCODE(Jump)                       \
     __ENUMERATE_OPCODE(JumpNonEmpty)               \
     __ENUMERATE_OPCODE(ForkJump)                   \
@@ -78,7 +79,9 @@ enum class OpCodeId : ByteCodeValueType {
     __ENUMERATE_CHARACTER_COMPARE_TYPE(LookupTable)          \
     __ENUMERATE_CHARACTER_COMPARE_TYPE(And)                  \
     __ENUMERATE_CHARACTER_COMPARE_TYPE(Or)                   \
-    __ENUMERATE_CHARACTER_COMPARE_TYPE(EndAndOr)
+    __ENUMERATE_CHARACTER_COMPARE_TYPE(EndAndOr)             \
+    __ENUMERATE_CHARACTER_COMPARE_TYPE(Subtract)             \
+    __ENUMERATE_CHARACTER_COMPARE_TYPE(StringSet)
 
 enum class CharacterCompareType : ByteCodeValueType {
 #define __ENUMERATE_CHARACTER_COMPARE_TYPE(x) x,
@@ -177,6 +180,50 @@ struct REGEX_API StringTable {
     HashMap<ByteCodeValueType, FlyString> m_inverse_table;
 };
 
+struct REGEX_API StringSetTable {
+    StringSetTable();
+    ~StringSetTable();
+    StringSetTable(StringSetTable const&) = default;
+    StringSetTable(StringSetTable&&) = default;
+    StringSetTable& operator=(StringSetTable const&) = default;
+    StringSetTable& operator=(StringSetTable&&) = default;
+
+    struct StringEntry {
+        Vector<u32> code_points;
+        size_t length;
+    };
+
+    ByteCodeValueType set(Vector<String> const& strings)
+    {
+        u32 local_index = m_table.size();
+        ByteCodeValueType global_index = static_cast<ByteCodeValueType>(m_serial) << 32 | static_cast<ByteCodeValueType>(local_index);
+
+        Vector<StringEntry> entries;
+        entries.ensure_capacity(strings.size());
+
+        for (auto const& str : strings) {
+            Vector<u32> code_points;
+            Utf8View utf8_view { str.bytes_as_string_view() };
+            code_points.ensure_capacity(utf8_view.length());
+            for (auto code_point : utf8_view)
+                code_points.unchecked_append(code_point);
+
+            entries.unchecked_append({ move(code_points), utf8_view.length() });
+        }
+
+        m_table.set(global_index, move(entries));
+        return global_index;
+    }
+
+    Vector<StringEntry> const& get(ByteCodeValueType index) const
+    {
+        return m_table.get(index).value();
+    }
+
+    u32 m_serial { 0 };
+    HashMap<ByteCodeValueType, Vector<StringEntry>> m_table;
+};
+
 class REGEX_API ByteCode : public DisjointChunks<ByteCodeValueType> {
     using Base = DisjointChunks<ByteCodeValueType>;
 
@@ -262,6 +309,10 @@ public:
     FlyString get_string(size_t index) const { return m_string_table.get(index); }
     auto const& string_table() const { return m_string_table; }
 
+    Vector<StringSetTable::StringEntry> const& get_string_set(size_t index) const { return m_string_set_table.get(index); }
+    auto const& string_set_table() const { return m_string_set_table; }
+    auto& string_set_table() { return m_string_set_table; }
+
     Optional<size_t> get_group_name_index(size_t group_index) const
     {
         return m_group_name_mappings.get(group_index);
@@ -285,6 +336,10 @@ public:
                 m_string_table.m_table.set(entry.key, entry.value);
             }
             m_string_table.m_inverse_table.update(other.m_string_table.m_inverse_table);
+
+            for (auto const& entry : other.m_string_set_table.m_table) {
+                m_string_set_table.m_table.set(entry.key, entry.value);
+            }
 
             for (auto const& mapping : other.m_group_name_mappings) {
                 m_group_name_mappings.set(mapping.key, mapping.value);
@@ -631,6 +686,7 @@ private:
     static bool s_opcodes_initialized;
     static size_t s_next_checkpoint_serial_id;
     StringTable m_string_table;
+    StringSetTable m_string_set_table;
     HashMap<size_t, size_t> m_group_name_mappings;
 };
 
@@ -872,7 +928,6 @@ public:
     Vector<CompareTypeAndValuePair> flat_compares() const;
     static bool matches_character_class(CharClass, u32, bool insensitive);
 
-private:
     ALWAYS_INLINE static void compare_char(MatchInput const& input, MatchState& state, u32 ch1, bool inverse, bool& inverse_matched);
     ALWAYS_INLINE static bool compare_string(MatchInput const& input, MatchState& state, RegexStringView str, bool& had_zero_length_match);
     ALWAYS_INLINE static void compare_character_class(MatchInput const& input, MatchState& state, CharClass character_class, u32 ch, bool inverse, bool& inverse_matched);
@@ -881,6 +936,16 @@ private:
     ALWAYS_INLINE static void compare_general_category(MatchInput const& input, MatchState& state, Unicode::GeneralCategory general_category, bool inverse, bool& inverse_matched);
     ALWAYS_INLINE static void compare_script(MatchInput const& input, MatchState& state, Unicode::Script script, bool inverse, bool& inverse_matched);
     ALWAYS_INLINE static void compare_script_extension(MatchInput const& input, MatchState& state, Unicode::Script script, bool inverse, bool& inverse_matched);
+};
+
+class REGEX_API OpCode_CompareStringSet final : public OpCode {
+public:
+    ExecutionResult execute(MatchInput const& input, MatchState& state) const override;
+    ALWAYS_INLINE OpCodeId opcode_id() const override { return OpCodeId::CompareStringSet; }
+    ALWAYS_INLINE size_t size() const override { return arguments_size() + 3; }
+    ALWAYS_INLINE size_t arguments_count() const { return argument(0); }
+    ALWAYS_INLINE size_t arguments_size() const { return argument(1); }
+    ByteString arguments_string() const override;
 };
 
 class OpCode_Repeat : public OpCode {
@@ -996,6 +1061,12 @@ template<>
 ALWAYS_INLINE bool is<OpCode_Compare>(OpCode const& opcode)
 {
     return opcode.opcode_id() == OpCodeId::Compare;
+}
+
+template<>
+ALWAYS_INLINE bool is<OpCode_CompareStringSet>(OpCode const& opcode)
+{
+    return opcode.opcode_id() == OpCodeId::CompareStringSet;
 }
 
 template<typename T>
