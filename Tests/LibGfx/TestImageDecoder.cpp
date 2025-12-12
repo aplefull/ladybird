@@ -226,6 +226,18 @@ TEST_CASE(test_gif_empty_lzw_data)
     EXPECT_EQ(frame.image->size(), Gfx::IntSize(1, 1));
 }
 
+TEST_CASE(test_gif_without_end_of_data_code)
+{
+    auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("gif/no-end-code.gif"sv)));
+    EXPECT(Gfx::GIFImageDecoderPlugin::sniff(file->bytes()));
+    auto plugin_decoder = TRY_OR_FAIL(Gfx::GIFImageDecoderPlugin::create(file->bytes()));
+
+    EXPECT_EQ(plugin_decoder->frame_count(), 1u);
+    auto frame = TRY_OR_FAIL(plugin_decoder->frame(0));
+    EXPECT_EQ(frame.image->size(), Gfx::IntSize(2, 2));
+    EXPECT_EQ(frame.image->get_pixel(0, 0), Gfx::Color::NamedColor::Red);
+}
+
 TEST_CASE(test_not_ico)
 {
     auto file = TRY_OR_FAIL(Core::MappedFile::map(TEST_INPUT("png/buggie.png"sv)));

@@ -109,7 +109,13 @@ public:
         u16 const end_of_data_code = lzw_decompressor.add_control_code();
 
         while (true) {
-            auto const code = TRY(lzw_decompressor.next_code());
+
+            auto code_result = lzw_decompressor.next_code();
+            if (code_result.is_error()) {
+                break;
+            }
+
+            auto const code = code_result.release_value();
 
             if (code == clear_code) {
                 lzw_decompressor.reset();
