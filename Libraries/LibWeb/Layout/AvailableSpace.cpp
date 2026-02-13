@@ -5,14 +5,14 @@
  */
 
 #include <LibWeb/Layout/AvailableSpace.h>
+#include <LibWeb/Layout/LayoutState.h>
 #include <math.h>
 
 namespace Web::Layout {
 
 AvailableSize AvailableSize::make_definite(CSSPixels value)
 {
-    VERIFY(!value.might_be_saturated());
-    return AvailableSize { Type::Definite, value };
+    return AvailableSize { Type::Definite, clamp_to_max_dimension_value(value) };
 }
 
 AvailableSize AvailableSize::make_indefinite()
